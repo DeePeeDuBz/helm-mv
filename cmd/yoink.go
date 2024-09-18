@@ -4,6 +4,7 @@ Copyright © 2024 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"archive/tar"
 	"context"
 	"fmt"
 	"io"
@@ -19,6 +20,11 @@ import (
 type resources struct {
 	Images []string `yaml:"images"`
 	Charts []string `yaml:"charts"`
+}
+
+type tars struct {
+	Name    string
+	Content []byte
 }
 
 // yoinkCmd represents the yoink command
@@ -55,32 +61,38 @@ func init() {
 
 func yoinkFromFile(fileName string) {
 	var rcs resources
+	var bundleContent []tars
 
-	yamlFile, err := os.ReadFile(fileName)
+	yamlContent, err := os.ReadFile(fileName)
 	if err != nil {
 		log.Fatal("Unable to read file.")
+	} else {
+		bundleContent = append(bundleContent, tars{"objects.yml", yamlContent})
 	}
 
-	err = yaml.Unmarshal(yamlFile, &rcs)
+	err = yaml.Unmarshal(yamlContent, &rcs)
 	if err != nil {
 		log.Fatal("Unable to parse file. Is it in the yaml format?")
 	}
 
-	handleImages(rcs.Images)
-
+	imageContent := handleImages(rcs.Images)
+	bundleContent = append(bundleContent, tars{"images.tar", imageContent})
 	for i := 0; i < len(rcs.Charts); i++ {
 		fmt.Print(rcs.Charts[i] + "\n")
 	}
+
+	bundleTars(bundleContent)
 }
 
-func handleImages(Images []string) {
+func handleImages(Images []string) []byte {
 	cli, err := client.NewClientWithOpts()
 	if err != nil {
 		log.Fatal(err)
 	}
 	Images = pullImages(cli, Images)
-	saveImages(cli, Images)
+	imageContent := saveImages(cli, Images)
 	cli.Close()
+	return imageContent
 }
 
 func pullImages(cli *client.Client, Images []string) []string {
@@ -102,25 +114,47 @@ func pullImages(cli *client.Client, Images []string) []string {
 	return Images
 }
 
-func saveImages(cli *client.Client, Images []string) {
+func saveImages(cli *client.Client, Images []string) []byte {
 	ctx := context.Background()
-	// Save the image as a tar file
-	tarFile, err := os.Create("images.tar")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer tarFile.Close()
 	fmt.Print(Images)
 	reader, err := cli.ImageSave(ctx, Images)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	_, err = io.Copy(tarFile, reader)
+	imageContent, err := io.ReadAll(reader)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Unable to read image data due to this error: %w\n", err)
 	}
+
 	reader.Close()
 	ctx.Done()
+	return imageContent
+}
+
+func bundleTars(bundleContent []tars) {
+	fmt.Print("Attempting to create tar...\n")
+	tarFile, err := os.Create("bundle.tar")
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+	tw := tar.NewWriter(tarFile)
+	fmt.Print(len(bundleContent))
+	for _, file := range bundleContent {
+		hdr := &tar.Header{
+			Name: file.Name,
+			Mode: 0660,
+			Size: int64(len(file.Content)),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			log.Fatal(err)
+		}
+		if _, err := tw.Write(file.Content); err != nil {
+			log.Fatal(err)
+		}
+
+	}
+	if err := tw.Close(); err != nil {
+		log.Fatal(err)
+	}
 }
